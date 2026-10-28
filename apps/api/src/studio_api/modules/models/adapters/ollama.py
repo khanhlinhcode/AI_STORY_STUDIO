@@ -82,7 +82,30 @@ def _has_repeated_scenes(story: dict[str, Any]) -> bool:
 
 
 def _has_unsupported_source_claim(story: dict[str, Any], summary: str) -> bool:
-    narration = " ".join(scene["narration"] for scene in story["scenes"])
+    narration = " ".join(
+        [story.get("title", ""), story.get("lesson", "")]
+        + [scene["narration"] for scene in story["scenes"]]
+    )
+    if "iceberg" in summary.casefold() and re.search(
+        r"(?:tảng\s+băng|\bA-81\b)[^.!?]{0,100}\bchìm\s+(?:sâu|xuống)\b",
+        narration,
+        re.I,
+    ) and not re.search(r"\b(?:sank|sinking|submerged)\b", summary, re.I):
+        return True
+    if "appeared to be bumping" in summary and re.search(
+        r"(?:\bA-81\b|tảng\s+băng\s+A-81)[^.!?]{0,120}"
+        r"(?:không\s+thể\s+đi\s+tiếp|dừng\s+lại|mắc\s+cạn|bị\s+kẹt)",
+        narration,
+        re.I,
+    ):
+        return True
+    if re.search(r"\b2,300\s+kilometers\b", summary, re.I) and re.search(
+        r"(?:gần|quay\s+về)[^.!?]{0,60}"
+        r"(?:nơi\s+(?:nó\s+)?(?:bắt\s+đầu|xuất\s+phát)|quê\s+nhà)",
+        narration,
+        re.I,
+    ):
+        return True
     if "Brunt Ice Shelf" in summary and re.search(r"tảng\s+băng\s+Brunt", narration, re.I):
         return True
     if "underwater shelf" in summary and re.search(
@@ -287,7 +310,11 @@ class OllamaAdapter:
                 "đối tượng khác cho đối tượng chính. Nếu nguồn nói 'approached' "
                 "thì chỉ viết 'đến gần', không viết 'chạm bờ'. 'Ice shelf' là "
                 "'thềm băng', không phải một tảng băng riêng. 'Underwater shelf' "
-                "là 'thềm ngầm'. Khi không chắc về chi tiết, bỏ chi tiết đó."
+                "là 'thềm ngầm'. Khi không chắc về chi tiết, bỏ chi tiết đó. "
+                "'Đến gần' và 'chậm lại' không có nghĩa là 'dừng lại', 'mắc cạn' "
+                "hay 'không thể đi tiếp'. Không kết luận số phận hoặc quay về nơi "
+                "xuất phát nếu nguồn không nói. Tảng băng nổi trên biển; không "
+                "viết nó chìm xuống. Không tự tính thêm thời lượng chính xác."
             )
             system += (
                 " Nhân vật hư cấu chỉ quan sát hoặc học hỏi; không tự tham gia "

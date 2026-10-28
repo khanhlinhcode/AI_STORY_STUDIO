@@ -96,6 +96,30 @@ def test_quality_gate_rejects_observed_repetition_and_source_misread() -> None:
     )
 
 
+def test_quality_gate_rejects_unsupported_a81_stoppage_and_sinking() -> None:
+    summary = (
+        "Iceberg A-81 approached South Georgia, 2,300 kilometers from the Brunt Ice Shelf. "
+        "Its progress slowed and it appeared to be bumping along the underwater shelf. "
+        "Another iceberg, A-23A, stopped there before."
+    )
+    assert _has_unsupported_source_claim(
+        {"title": "A-81", "lesson": "Nó dừng lại gần nơi nó bắt đầu", "scenes": []},
+        summary,
+    )
+    assert _has_unsupported_source_claim(
+        {"scenes": [{"narration": "Tảng băng A-81 không thể đi tiếp được nữa."}]},
+        summary,
+    )
+    assert _has_unsupported_source_claim(
+        {"scenes": [{"narration": "Tảng băng A-81 chìm sâu trong biển Weddell."}]},
+        summary,
+    )
+    assert not _has_unsupported_source_claim(
+        {"scenes": [{"narration": "A-81 dường như va vào mép thềm ngầm và chậm lại."}]},
+        summary,
+    )
+
+
 @pytest.mark.asyncio
 async def test_ollama_retries_bad_geography_then_accepts_grounded_story() -> None:
     story = await FakeAdapter().generate_script("A-81", source_context=SOURCE)
