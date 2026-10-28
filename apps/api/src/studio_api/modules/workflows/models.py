@@ -108,7 +108,9 @@ class AutomationBatch(UUIDTimestampMixin, Base):
 
 class SourceStory(UUIDTimestampMixin, Base):
     __tablename__ = "source_stories"
-    __table_args__ = (UniqueConstraint("project_id", "source_hash"),)
+    __table_args__ = (
+        UniqueConstraint("project_id", "source_hash", name="uq_source_stories_project_source"),
+    )
 
     project_id: Mapped[UUID] = mapped_column(
         ForeignKey("projects.id", ondelete="CASCADE"), index=True
