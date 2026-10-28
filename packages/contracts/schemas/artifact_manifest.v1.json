@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://story-studio.local/schemas/artifact_manifest.v1.json",
+  "title": "ArtifactManifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "sha256", "mime_type", "size_bytes", "storage_key", "lineage"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "mime_type": {"type": "string", "minLength": 3},
+    "size_bytes": {"type": "integer", "minimum": 0},
+    "storage_key": {"type": "string", "minLength": 1},
+    "duration_ms": {"type": ["integer", "null"], "minimum": 0},
+    "lineage": {
+      "type": "object",
+      "required": ["input_hashes", "adapter_id"],
+      "properties": {
+        "input_hashes": {"type": "array", "items": {"type": "string"}},
+        "adapter_id": {"type": "string"},
+        "model_hash": {"type": ["string", "null"]},
+        "seed": {"type": ["integer", "null"]}
+      },
+      "additionalProperties": true
+    }
+  }
+}
+

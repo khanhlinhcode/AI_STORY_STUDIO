@@ -1,0 +1,8 @@
+{
+  "name": "@story-studio/design-system",
+  "version": "0.1.0",
+  "private": true,
+  "sideEffects": ["*.css"],
+  "exports": {"./tokens.css": "./tokens.css"}
+}
+

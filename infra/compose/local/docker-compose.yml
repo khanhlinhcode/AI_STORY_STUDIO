@@ -1,0 +1,282 @@
+name: ai-story-studio
+
+x-common-env: &common-env
+  DATABASE_URL: ${DATABASE_URL}
+  SYNC_DATABASE_URL: ${SYNC_DATABASE_URL}
+  REDIS_URL: ${REDIS_URL}
+  MINIO_ENDPOINT: ${MINIO_ENDPOINT}
+  MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+  MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+  MINIO_SECURE: ${MINIO_SECURE:-false}
+  MINIO_ASSET_BUCKET: ${MINIO_ASSET_BUCKET:-studio-assets}
+  ASSET_BACKEND: ${ASSET_BACKEND:-minio}
+  LOCAL_ASSET_ROOT: ${LOCAL_ASSET_ROOT:-/app/local-data/assets}
+  MINIO_MLFLOW_BUCKET: ${MINIO_MLFLOW_BUCKET:-mlflow-artifacts}
+  MINIO_DVC_BUCKET: ${MINIO_DVC_BUCKET:-dvc-store}
+  MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI}
+  OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+  COMFYUI_BASE_URL: ${COMFYUI_BASE_URL:-http://host.docker.internal:8188}
+  VIENEU_BASE_URL: ${VIENEU_BASE_URL:-http://host.docker.internal:7860}
+  MACOS_TTS_BASE_URL: ${MACOS_TTS_BASE_URL:-http://host.docker.internal:7861}
+  AI_ADAPTER_MODE: ${AI_ADAPTER_MODE:-fake}
+  AI_STORY_MODE: ${AI_STORY_MODE:-fake}
+  AI_VOICE_MODE: ${AI_VOICE_MODE:-fake}
+  OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:4b}
+  ACTIVE_LORA_NAME: ${ACTIVE_LORA_NAME:-}
+  JWT_SECRET: ${JWT_SECRET}
+  STUDIO_INTERNAL_KEY: ${STUDIO_INTERNAL_KEY}
+
+x-api-image: &api-image
+  image: ai-story-studio-api:local
+  build:
+    context: ../../..
+    dockerfile: apps/api/Dockerfile
+  environment: *common-env
+  networks: [studio]
+  extra_hosts:
+    - host.docker.internal:host-gateway
+
+services:
+  studio-web:
+    build:
+      context: ../../..
+      dockerfile: apps/studio-web/Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000/api/v1}
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000/api/v1}
+      BACKEND_API_URL: http://studio-api:8000/api/v1
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+    ports:
+      - 127.0.0.1:3000:3000
+    depends_on:
+      studio-api:
+        condition: service_healthy
+    networks: [studio]
+    restart: unless-stopped
+
+  studio-api:
+    <<: *api-image
+    command: ["/bin/sh", "-ec", "alembic upgrade head && exec uvicorn studio_api.main:app --host 0.0.0.0 --port 8000"]
+    ports:
+      - 127.0.0.1:8000:8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  worker-dispatcher:
+    <<: *api-image
+    command: ["celery", "-A", "studio_api.core.celery_app:celery_app", "worker", "-Q", "dispatcher", "--concurrency=1", "--loglevel=INFO"]
+    depends_on:
+      studio-api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker-beat:
+    <<: *api-image
+    command: ["celery", "-A", "studio_api.core.celery_app:celery_app", "beat", "--loglevel=INFO"]
+    depends_on:
+      studio-api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker-cpu:
+    <<: *api-image
+    command: ["celery", "-A", "studio_api.core.celery_app:celery_app", "worker", "-Q", "cpu", "--concurrency=1", "--loglevel=INFO"]
+    depends_on:
+      studio-api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-studio}
+    ports:
+      - 127.0.0.1:5432:5432
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init-postgres.sql:/docker-entrypoint-initdb.d/10-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [studio]
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - 127.0.0.1:${REDIS_HOST_PORT:-6379}:6379
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [studio]
+    restart: unless-stopped
+
+  minio:
+    image: pgsty/silo:RELEASE.2026-10-18T00-00-00Z
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY}
+    ports:
+      - 127.0.0.1:9000:9000
+      - 127.0.0.1:9001:9001
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [studio]
+    restart: unless-stopped
+
+  minio-setup:
+    image: pgsty/mc:RELEASE.2026-10-25T00-00-00Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_ASSET_BUCKET: ${MINIO_ASSET_BUCKET:-studio-assets}
+      MINIO_MLFLOW_BUCKET: ${MINIO_MLFLOW_BUCKET:-mlflow-artifacts}
+      MINIO_DVC_BUCKET: ${MINIO_DVC_BUCKET:-dvc-store}
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        mc alias set local http://minio:9000 "$${MINIO_ACCESS_KEY}" "$${MINIO_SECRET_KEY}"
+        mc mb --ignore-existing "local/$${MINIO_ASSET_BUCKET}"
+        mc mb --ignore-existing "local/$${MINIO_MLFLOW_BUCKET}"
+        mc mb --ignore-existing "local/$${MINIO_DVC_BUCKET}"
+    networks: [studio]
+    restart: "no"
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.17.0
+    command:
+      - mlflow
+      - server
+      - --host=0.0.0.0
+      - --port=5000
+      - --backend-store-uri=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/mlflow_db
+      - --default-artifact-root=s3://${MINIO_MLFLOW_BUCKET:-mlflow-artifacts}/
+      - --serve-artifacts
+    environment:
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_SECRET_KEY}
+    ports:
+      - 127.0.0.1:5000:5000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-setup:
+        condition: service_completed_successfully
+    networks: [studio]
+    restart: unless-stopped
+
+  n8n:
+    image: n8nio/n8n:latest
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: n8n_db
+      DB_POSTGRESDB_USER: ${POSTGRES_USER}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+      GENERIC_TIMEZONE: Asia/Ho_Chi_Minh
+      STUDIO_INTERNAL_KEY: ${STUDIO_INTERNAL_KEY}
+      STUDIO_PROJECT_ID: ${STUDIO_PROJECT_ID:-}
+      TOPICS_SHEET_ID: ${TOPICS_SHEET_ID:-}
+      TOPICS_SHEET_NAME: ${TOPICS_SHEET_NAME:-Topics}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      N8N_HOST: localhost
+      N8N_PORT: 5678
+      WEBHOOK_URL: http://localhost:5678/
+    ports:
+      - 127.0.0.1:5678:5678
+    volumes:
+      - n8n-data:/home/node/.n8n
+      - ../../n8n/workflows:/workflows:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [studio]
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus"]
+    ports:
+      - 127.0.0.1:9090:9090
+    volumes:
+      - ../../monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../../monitoring/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+      - prometheus-data:/prometheus
+    networks: [studio]
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - 127.0.0.1:3001:3000
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ../../monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../../monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on: [prometheus]
+    networks: [studio]
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.60
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - 127.0.0.1:16686:16686
+      - 127.0.0.1:4317:4317
+      - 127.0.0.1:4318:4318
+    networks: [studio]
+    restart: unless-stopped
+
+networks:
+  studio:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:
+  minio-data:
+  n8n-data:
+  prometheus-data:
+  grafana-data:
+

@@ -1,0 +1,16 @@
+{
+  "title": "AI Story Studio Operations",
+  "uid": "story-studio-ops",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "15s",
+  "time": {"from": "now-24h", "to": "now"},
+  "panels": [
+    {"id": 1, "type": "timeseries", "title": "Queue depth", "targets": [{"expr": "studio_queue_depth", "refId": "A"}], "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}},
+    {"id": 2, "type": "stat", "title": "Active workers", "targets": [{"expr": "studio_active_workers", "refId": "A"}], "gridPos": {"h": 8, "w": 6, "x": 12, "y": 0}},
+    {"id": 3, "type": "timeseries", "title": "Job outcomes", "targets": [{"expr": "sum by (status) (rate(studio_job_total[5m]))", "refId": "A"}], "gridPos": {"h": 8, "w": 6, "x": 18, "y": 0}},
+    {"id": 4, "type": "timeseries", "title": "Render duration p95", "targets": [{"expr": "histogram_quantile(0.95, sum by (le, kind) (rate(studio_job_duration_seconds_bucket[5m])))", "refId": "A"}], "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}},
+    {"id": 5, "type": "timeseries", "title": "GPU OOM", "targets": [{"expr": "increase(studio_gpu_oom_total[1h])", "refId": "A"}], "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}}
+  ]
+}
+

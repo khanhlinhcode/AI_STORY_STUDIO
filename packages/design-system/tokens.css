@@ -1,0 +1,14 @@
+:root {
+  --studio-color-ink: #111827;
+  --studio-color-canvas: #f6f5f0;
+  --studio-color-panel: #fffdfa;
+  --studio-color-accent: #0f9f8f;
+  --studio-color-danger: #dc2626;
+  --studio-space-1: 0.5rem;
+  --studio-space-2: 1rem;
+  --studio-space-3: 1.5rem;
+  --studio-radius-control: 0.75rem;
+  --studio-radius-panel: 1.25rem;
+  --studio-focus: 0 0 0 3px rgba(15, 159, 143, 0.35);
+}
+

@@ -1,0 +1,19 @@
+groups:
+  - name: studio-operations
+    rules:
+      - alert: QueueDepthHigh
+        expr: studio_queue_depth > 50
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: "Studio queue depth is above 50"}
+      - alert: NoActiveWorkers
+        expr: studio_active_workers == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations: {summary: "No Studio workers are active"}
+      - alert: HighJobFailureRate
+        expr: rate(studio_job_total{status="failed"}[5m]) / clamp_min(rate(studio_job_total[5m]), 0.001) > 0.2
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: "Job failure rate exceeds 20%"}
+

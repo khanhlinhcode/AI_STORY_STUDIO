@@ -1,0 +1,15 @@
+{
+  "name": "ai-story-studio",
+  "private": true,
+  "workspaces": ["apps/studio-web", "packages/design-system"],
+  "scripts": {
+    "dev": "npm run dev --workspace @story-studio/web",
+    "build": "npm run build --workspace @story-studio/web",
+    "test": "npm run test --workspace @story-studio/web",
+    "lint": "npm run lint --workspace @story-studio/web",
+    "typecheck": "npm run typecheck --workspace @story-studio/web"
+  },
+  "engines": {"node": ">=22 <23"},
+  "packageManager": "npm@10.9.8"
+}
+

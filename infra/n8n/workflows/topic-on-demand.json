@@ -1,0 +1,93 @@
+{
+  "name": "AI Story Studio - Topic On Demand",
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "nodes": [
+    {
+      "id": "topic-webhook",
+      "name": "Topic webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [240, 300],
+      "webhookId": "ai-story-studio-topic",
+      "parameters": { "httpMethod": "POST", "path": "studio/topic", "responseMode": "onReceived", "options": {} }
+    },
+    {
+      "id": "topic-generate",
+      "name": "Create story job",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "http://studio-api:8000/webhooks/generate",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [{ "name": "Authorization", "value": "={{ 'Bearer ' + $env.STUDIO_INTERNAL_KEY }}" }] },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ topic: $json.body.topic, project_id: $json.body.project_id || $env.STUDIO_PROJECT_ID }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "topic-wait",
+      "name": "Wait 30 seconds",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [720, 300],
+      "webhookId": "ai-story-studio-topic-wait",
+      "parameters": { "resume": "timeInterval", "amount": 30, "unit": "seconds" }
+    },
+    {
+      "id": "topic-status",
+      "name": "Poll job status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [960, 300],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ 'http://studio-api:8000/webhooks/jobs/' + $json.job_id }}",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [{ "name": "Authorization", "value": "={{ 'Bearer ' + $env.STUDIO_INTERNAL_KEY }}" }] },
+        "options": {}
+      }
+    },
+    {
+      "id": "topic-terminal",
+      "name": "Job finished?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1200, 300],
+      "parameters": {
+        "conditions": { "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" }, "combinator": "or", "conditions": [
+          { "id": "topic-completed", "leftValue": "={{ $json.status }}", "rightValue": "completed", "operator": { "type": "string", "operation": "equals" } },
+          { "id": "topic-failed", "leftValue": "={{ $json.status }}", "rightValue": "failed", "operator": { "type": "string", "operation": "equals" } },
+          { "id": "topic-cancelled", "leftValue": "={{ $json.status }}", "rightValue": "cancelled", "operator": { "type": "string", "operation": "equals" } }
+        ] },
+        "options": {}
+      }
+    },
+    {
+      "id": "topic-telegram",
+      "name": "Telegram result",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1440, 240],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://api.telegram.org/bot' + $env.TELEGRAM_BOT_TOKEN + '/sendMessage' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $env.TELEGRAM_CHAT_ID, text: 'AI Story Studio job ' + $json.job_id + ': ' + $json.status + '. Mở http://localhost:3000/jobs/' + $json.job_id }) }}",
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Topic webhook": { "main": [[{ "node": "Create story job", "type": "main", "index": 0 }]] },
+    "Create story job": { "main": [[{ "node": "Wait 30 seconds", "type": "main", "index": 0 }]] },
+    "Wait 30 seconds": { "main": [[{ "node": "Poll job status", "type": "main", "index": 0 }]] },
+    "Poll job status": { "main": [[{ "node": "Job finished?", "type": "main", "index": 0 }]] },
+    "Job finished?": { "main": [[{ "node": "Telegram result", "type": "main", "index": 0 }], [{ "node": "Wait 30 seconds", "type": "main", "index": 0 }]] }
+  }
+}

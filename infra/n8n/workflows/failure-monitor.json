@@ -1,0 +1,57 @@
+{
+  "name": "AI Story Studio - Failure Monitor",
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "nodes": [
+    {
+      "id": "failure-schedule",
+      "name": "Every 15 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 300],
+      "parameters": { "rule": { "interval": [{ "field": "minutes", "minutesInterval": 15 }] } }
+    },
+    {
+      "id": "failure-query",
+      "name": "Get failed jobs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 300],
+      "parameters": {
+        "method": "GET",
+        "url": "http://studio-api:8000/webhooks/jobs?status=failed&since=15",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [{ "name": "Authorization", "value": "={{ 'Bearer ' + $env.STUDIO_INTERNAL_KEY }}" }] },
+        "options": {}
+      }
+    },
+    {
+      "id": "failure-message",
+      "name": "Summarize failures",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [720, 300],
+      "parameters": { "jsCode": "const jobs = items.flatMap(item => Array.isArray(item.json) ? item.json : [item.json]).filter(job => job.job_id); if (!jobs.length) return []; return [{ json: { message: '❌ AI Story Studio: ' + jobs.length + ' job thất bại trong 15 phút. IDs: ' + jobs.map(job => job.job_id).join(', ') } }];" }
+    },
+    {
+      "id": "failure-telegram",
+      "name": "Telegram alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [960, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://api.telegram.org/bot' + $env.TELEGRAM_BOT_TOKEN + '/sendMessage' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $env.TELEGRAM_CHAT_ID, text: $json.message }) }}",
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Every 15 minutes": { "main": [[{ "node": "Get failed jobs", "type": "main", "index": 0 }]] },
+    "Get failed jobs": { "main": [[{ "node": "Summarize failures", "type": "main", "index": 0 }]] },
+    "Summarize failures": { "main": [[{ "node": "Telegram alert", "type": "main", "index": 0 }]] }
+  }
+}

@@ -1,0 +1,142 @@
+from __future__ import annotations
+
+import hashlib
+
+import httpx
+
+from studio_api.core.config import get_settings
+from studio_api.core.errors import ErrorCode, StudioError
+from studio_api.modules.models.adapters.types import (
+    ArtifactManifest,
+    CapabilityReport,
+    GenerationRequest,
+    ResourceEstimate,
+)
+
+
+class VieNeuTTSAdapter:
+    backend_id = "vieneu-tts"
+
+    def __init__(self, client: httpx.AsyncClient | None = None) -> None:
+        self.settings = get_settings()
+        self.client = client or httpx.AsyncClient(timeout=180)
+
+    async def probe(self) -> CapabilityReport:
+        try:
+            response = await self.client.get(f"{self.settings.vieneu_base_url}/config")
+            response.raise_for_status()
+            return CapabilityReport(
+                backend_id=self.backend_id,
+                available=True,
+                task_types=["audio"],
+                model_ids=["vieneu-v3-turbo"],
+                supported_formats=["audio/wav"],
+                license_flags=["verify-voice-rights"],
+            )
+        except httpx.HTTPError as exc:
+            return CapabilityReport(
+                backend_id=self.backend_id,
+                available=False,
+                task_types=["audio"],
+                unavailable_reason=str(exc),
+            )
+
+    async def estimate(self, request: GenerationRequest) -> ResourceEstimate:
+        return ResourceEstimate(ram_mb=2048, disk_mb=16, duration_seconds=20)
+
+    async def generate(self, request: GenerationRequest) -> ArtifactManifest:
+        response = await self.client.post(
+            f"{self.settings.vieneu_base_url}/api/predict",
+            json={
+                "data": [
+                    request.prompt,
+                    request.parameters.get("voice", "vi-VN-HoaiMyNeural"),
+                    request.parameters.get("speed", 0.9),
+                ]
+            },
+        )
+        response.raise_for_status()
+        remote_path = response.json().get("data", [None])[0]
+        if not remote_path:
+            raise StudioError(ErrorCode.MODEL_UNAVAILABLE, "VieNeu returned no audio")
+        download = await self.client.get(str(remote_path))
+        download.raise_for_status()
+        content = download.content
+        digest = hashlib.sha256(content).hexdigest()
+        output = self.settings.local_asset_root / "vieneu" / f"{digest}.wav"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(content)
+        return ArtifactManifest(
+            sha256=digest,
+            mime_type="audio/wav",
+            size_bytes=len(content),
+            storage_key=str(output),
+            lineage={"input_hashes": [], "adapter_id": self.backend_id},
+        )
+
+    async def cancel(self, operation_id: str) -> bool:
+        return False
+
+
+class MacOSTTSAdapter:
+    backend_id = "macos-say"
+
+    def __init__(self, client: httpx.AsyncClient | None = None) -> None:
+        self.settings = get_settings()
+        self.client = client or httpx.AsyncClient(timeout=180)
+
+    async def probe(self) -> CapabilityReport:
+        try:
+            response = await self.client.get(f"{self.settings.macos_tts_base_url}/health")
+            response.raise_for_status()
+            ready = response.json().get("ready") is True
+            return CapabilityReport(
+                backend_id=self.backend_id,
+                available=ready,
+                task_types=["audio"],
+                model_ids=["Apple Linh vi_VN"] if ready else [],
+                supported_formats=["audio/wav"],
+                unavailable_reason=None if ready else "macOS say or FFmpeg is unavailable",
+            )
+        except (httpx.HTTPError, ValueError) as exc:
+            return CapabilityReport(
+                backend_id=self.backend_id,
+                available=False,
+                task_types=["audio"],
+                unavailable_reason=str(exc),
+            )
+
+    async def estimate(self, request: GenerationRequest) -> ResourceEstimate:
+        return ResourceEstimate(ram_mb=128, disk_mb=2, duration_seconds=10)
+
+    async def generate(self, request: GenerationRequest) -> ArtifactManifest:
+        try:
+            response = await self.client.post(
+                f"{self.settings.macos_tts_base_url}/speak", json={"text": request.prompt}
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise StudioError(
+                ErrorCode.MODEL_UNAVAILABLE, "macOS voice bridge is unavailable"
+            ) from exc
+        content = response.content
+        if len(content) < 100 or len(content) > 20_000_000 or content[:4] != b"RIFF":
+            raise StudioError(ErrorCode.MODEL_UNAVAILABLE, "macOS voice returned invalid WAV")
+        digest = hashlib.sha256(content).hexdigest()
+        output = self.settings.local_asset_root / "macos-voice" / f"{digest}.wav"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(content)
+        return ArtifactManifest(
+            sha256=digest,
+            mime_type="audio/wav",
+            size_bytes=len(content),
+            storage_key=str(output),
+            lineage={
+                "input_hashes": [hashlib.sha256(request.prompt.encode()).hexdigest()],
+                "adapter_id": self.backend_id,
+                "voice": "Apple Linh vi_VN",
+            },
+        )
+
+    async def cancel(self, operation_id: str) -> bool:
+        return False

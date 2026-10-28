@@ -1,0 +1,11 @@
+.git
+.venv
+**/node_modules
+**/.next
+**/__pycache__
+local-data
+artifacts
+*.safetensors
+*.gguf
+*.onnx
+

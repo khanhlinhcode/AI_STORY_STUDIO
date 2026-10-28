@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://story-studio.local/schemas/scene_spec.v1.json",
+  "title": "SceneSpec v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "image_desc", "narration", "duration_ms", "camera"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "id": {"type": "string"},
+    "image_desc": {"type": "string", "minLength": 1},
+    "narration": {"type": "string", "minLength": 1},
+    "duration_ms": {"type": "integer", "minimum": 3000, "maximum": 60000},
+    "camera": {"type": "string", "enum": ["static", "slow_pan_left", "slow_pan_right", "slow_zoom_in", "slow_zoom_out"]}
+  }
+}
+

@@ -1,0 +1,8 @@
+import { Activity, DatabaseBackup, Gauge, KeyRound, ServerCog, ShieldCheck } from "lucide-react";
+import { PageHeading } from "@/components/page-heading";
+
+export default function AdminPage() {
+  const cards = [{ icon: ServerCog, title: "Workers", value: "Fake adapter", note: "Native workers chưa đăng ký" }, { icon: Gauge, title: "Queue", value: "Healthy", note: "Redis broker reachable when Compose runs" }, { icon: DatabaseBackup, title: "Backups", value: "Not scheduled", note: "Chạy backup script sau khi cấu hình MinIO" }, { icon: KeyRound, title: "Secrets", value: "Environment", note: "Không hiển thị giá trị trong UI" }];
+  return <><PageHeading eyebrow="Operations" title="Vận hành" description="Tình trạng worker, hàng đợi, backup và chính sách bảo mật trong một mặt phẳng điều khiển."/><div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-4">{cards.map(({ icon: Icon, title, value, note }) => <article key={title} className="panel p-5"><Icon className="text-teal-600"/><p className="mt-5 text-sm font-bold text-slate-500">{title}</p><p className="mt-1 text-xl font-extrabold">{value}</p><p className="mt-2 text-xs leading-5 text-slate-400">{note}</p></article>)}</div><div className="panel mt-7 p-6"><div className="flex items-center gap-3"><span className="grid h-11 w-11 place-items-center rounded-xl bg-emerald-50 text-emerald-600"><ShieldCheck/></span><div><h2 className="font-extrabold">Security posture</h2><p className="text-sm text-slate-500">Workspace-scoped RBAC, signed worker payloads và SSRF guard đã bật.</p></div><Activity className="ml-auto text-emerald-600"/></div></div></>;
+}
+
