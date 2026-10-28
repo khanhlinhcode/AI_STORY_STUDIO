@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import tempfile
+from pathlib import Path
 
+import edge_tts
 import httpx
 
 from studio_api.core.config import get_settings
@@ -12,6 +16,104 @@ from studio_api.modules.models.adapters.types import (
     GenerationRequest,
     ResourceEstimate,
 )
+
+
+class EdgeTTSAdapter:
+    """Vietnamese preview voice; output rights require separate verification."""
+
+    backend_id = "edge-tts"
+    voices = {"vi-VN-HoaiMyNeural", "vi-VN-NamMinhNeural"}
+
+    def __init__(self) -> None:
+        self.settings = get_settings()
+
+    async def probe(self) -> CapabilityReport:
+        try:
+            available = {
+                voice["ShortName"]
+                for voice in await edge_tts.list_voices()
+                if voice.get("Locale") == "vi-VN"
+            }
+            selected = sorted(available & self.voices)
+            return CapabilityReport(
+                backend_id=self.backend_id,
+                available=bool(selected),
+                task_types=["audio"],
+                model_ids=selected,
+                supported_formats=["audio/wav"],
+                license_flags=["commercial-rights-unverified", "preview-only"],
+                unavailable_reason=None if selected else "No Vietnamese Edge voice is available",
+            )
+        except Exception as exc:
+            return CapabilityReport(
+                backend_id=self.backend_id,
+                available=False,
+                task_types=["audio"],
+                unavailable_reason=str(exc),
+            )
+
+    async def estimate(self, request: GenerationRequest) -> ResourceEstimate:
+        return ResourceEstimate(ram_mb=128, disk_mb=16, duration_seconds=20)
+
+    async def generate(self, request: GenerationRequest) -> ArtifactManifest:
+        voice = str(request.parameters.get("voice", "vi-VN-HoaiMyNeural"))
+        if request.task_type != "audio" or not request.prompt.strip() or voice not in self.voices:
+            raise StudioError(ErrorCode.POLICY_REJECTED, "Invalid Edge TTS request")
+        with tempfile.TemporaryDirectory(prefix="studio-edge-tts-") as folder:
+            mp3 = Path(folder) / "narration.mp3"
+            wav = Path(folder) / "narration.wav"
+            try:
+                await edge_tts.Communicate(
+                    request.prompt, voice=voice, rate="-10%", pitch="+5Hz"
+                ).save(str(mp3))
+                process = await asyncio.create_subprocess_exec(
+                    "ffmpeg",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-i",
+                    str(mp3),
+                    "-af",
+                    "loudnorm=I=-14:TP=-1.5:LRA=11",
+                    "-ar",
+                    "48000",
+                    "-ac",
+                    "1",
+                    str(wav),
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _, stderr = await process.communicate()
+            except (OSError, edge_tts.exceptions.EdgeTTSException) as exc:
+                raise StudioError(ErrorCode.MODEL_UNAVAILABLE, "Edge TTS is unavailable") from exc
+            if process.returncode != 0:
+                raise StudioError(
+                    ErrorCode.MODEL_UNAVAILABLE,
+                    f"Edge TTS audio conversion failed: {stderr.decode(errors='replace')[:200]}",
+                )
+            content = wav.read_bytes()
+        if len(content) < 100 or content[:4] != b"RIFF" or content[8:12] != b"WAVE":
+            raise StudioError(ErrorCode.MODEL_UNAVAILABLE, "Edge TTS returned invalid WAV")
+        digest = hashlib.sha256(content).hexdigest()
+        destination = self.settings.local_asset_root / "edge-voice" / f"{digest}.wav"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(content)
+        return ArtifactManifest(
+            sha256=digest,
+            mime_type="audio/wav",
+            size_bytes=len(content),
+            storage_key=str(destination),
+            lineage={
+                "input_hashes": [hashlib.sha256(request.prompt.encode()).hexdigest()],
+                "adapter_id": self.backend_id,
+                "voice": voice,
+                "rights_review_required": True,
+            },
+        )
+
+    async def cancel(self, operation_id: str) -> bool:
+        return False
 
 
 class VieNeuTTSAdapter:

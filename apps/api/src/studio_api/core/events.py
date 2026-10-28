@@ -9,6 +9,7 @@ from sqlalchemy import text
 from studio_api.core.config import get_settings
 from studio_api.core.db import SessionFactory
 from studio_api.modules.models.adapters.registry import get_adapter_registry
+from studio_api.modules.models.adapters.types import BaseAdapter
 
 
 async def service_health() -> dict[str, Any]:
@@ -28,10 +29,24 @@ async def service_health() -> dict[str, Any]:
         cache = "down"
     finally:
         await client.aclose()
-    reports = await get_adapter_registry().capabilities()
+    registry = get_adapter_registry()
+    selected: list[BaseAdapter] = [
+        registry.get_story_adapter(),
+        registry.get_image_adapter(),
+        registry.get_tts_adapter(),
+    ]
+
+    async def check(adapter: BaseAdapter) -> tuple[str, bool]:
+        try:
+            report = await asyncio.wait_for(adapter.probe(), timeout=2)
+            return report.backend_id, report.available
+        except Exception:
+            return adapter.backend_id, False
+
+    services = dict(await asyncio.gather(*(check(adapter) for adapter in selected)))
     return {
         "status": "ok" if database == "ok" else "degraded",
         "db": database,
         "redis": cache,
-        "ai_services": {report.backend_id: report.available for report in reports},
+        "ai_services": services,
     }

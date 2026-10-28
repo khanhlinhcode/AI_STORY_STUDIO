@@ -19,6 +19,7 @@ x-common-env: &common-env
   VIENEU_BASE_URL: ${VIENEU_BASE_URL:-http://host.docker.internal:7860}
   MACOS_TTS_BASE_URL: ${MACOS_TTS_BASE_URL:-http://host.docker.internal:7861}
   AI_ADAPTER_MODE: ${AI_ADAPTER_MODE:-fake}
+  REPLICATE_API_TOKEN: ${REPLICATE_API_TOKEN:-}
   AI_STORY_MODE: ${AI_STORY_MODE:-fake}
   AI_VOICE_MODE: ${AI_VOICE_MODE:-fake}
   OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:4b}
@@ -218,7 +219,7 @@ services:
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
       N8N_HOST: localhost
       N8N_PORT: 5678
-      WEBHOOK_URL: http://localhost:5678/
+      N8N_WEBHOOK_URL: http://localhost:5678/
     ports:
       - 127.0.0.1:5678:5678
     volumes:

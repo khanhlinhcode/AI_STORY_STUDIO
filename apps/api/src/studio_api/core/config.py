@@ -33,9 +33,10 @@ class Settings(BaseSettings):
     asset_backend: Literal["local", "minio"] = "local"
     local_asset_root: Path = Path("./local-data/assets")
 
-    ai_adapter_mode: Literal["fake", "native"] = "fake"
+    ai_adapter_mode: Literal["fake", "native", "replicate"] = "fake"
+    replicate_api_token: str = ""
     ai_story_mode: Literal["fake", "ollama"] = "fake"
-    ai_voice_mode: Literal["fake", "macos", "native"] = "fake"
+    ai_voice_mode: Literal["fake", "macos", "native", "edge"] = "fake"
     ollama_base_url: str = "http://localhost:11434"
     comfyui_base_url: str = "http://localhost:8188"
     vieneu_base_url: str = "http://localhost:7860"
