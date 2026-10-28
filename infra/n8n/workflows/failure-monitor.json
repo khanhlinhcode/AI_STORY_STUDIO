@@ -31,7 +31,7 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [720, 300],
-      "parameters": { "jsCode": "const jobs = items.flatMap(item => Array.isArray(item.json) ? item.json : [item.json]).filter(job => job.job_id); if (!jobs.length) return []; return [{ json: { message: '❌ AI Story Studio: ' + jobs.length + ' job thất bại trong 15 phút. IDs: ' + jobs.map(job => job.job_id).join(', ') } }];" }
+      "parameters": { "jsCode": "const jobs = items.flatMap(item => Array.isArray(item.json) ? item.json : [item.json]).filter(job => job.job_id); if (!jobs.length) return []; return [{ json: { message: '❌ AI Story Studio: ' + jobs.length + ' job thất bại trong 15 phút. ' + jobs.map(job => job.job_id + ' (' + (job.error_code || 'UNKNOWN') + ')').join(', ') } }];" }
     },
     {
       "id": "failure-telegram",
