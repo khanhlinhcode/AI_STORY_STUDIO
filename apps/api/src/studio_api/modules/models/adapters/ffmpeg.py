@@ -9,6 +9,14 @@ from typing import Any
 from studio_api.core.errors import ErrorCode, StudioError
 
 
+def get_ffmpeg_scale_filter(width: int, height: int) -> str:
+    """Letterbox an image to an exact output size, regardless of source size."""
+    return (
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=0x1a1a2e,setsar=1"
+    )
+
+
 class FFmpegAdapter:
     backend_id = "ffmpeg"
 
@@ -48,8 +56,7 @@ class FFmpegAdapter:
             raise StudioError(ErrorCode.MODEL_UNAVAILABLE, "FFmpeg and ffprobe are not installed")
         frames = max(1, round(duration_seconds * 30))
         filter_graph = (
-            f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,"
+            f"{get_ffmpeg_scale_filter(width, height)},"
             f"zoompan=z='min(zoom+0.0003,1.08)':d={frames}:s={width}x{height}:fps=30,"
             "format=yuv420p"
         )
@@ -96,8 +103,7 @@ class FFmpegAdapter:
             seconds = duration_ms / 1000
             frames = round(seconds * 30)
             zoom_filter = (
-                f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,"
+                f"{get_ffmpeg_scale_filter(width, height)},"
                 f"zoompan=z='min(zoom+0.0003,1.08)':d={frames}:s={width}x{height}:fps=30,"
                 "format=yuv420p"
             )
@@ -176,6 +182,9 @@ class FFmpegAdapter:
         codecs = {stream["codec_type"]: stream["codec_name"] for stream in metadata["streams"]}
         if codecs.get("video") != "h264" or codecs.get("audio") != "aac":
             raise StudioError(ErrorCode.POLICY_REJECTED, "Rendered media codecs are invalid")
+        video = next(stream for stream in metadata["streams"] if stream["codec_type"] == "video")
+        if video["width"] != width or video["height"] != height:
+            raise StudioError(ErrorCode.POLICY_REJECTED, "Rendered resolution is invalid")
         if abs(actual_seconds - expected_seconds) > expected_seconds * 0.05:
             raise StudioError(ErrorCode.POLICY_REJECTED, "Rendered duration drift exceeds 5%")
         await self._run(

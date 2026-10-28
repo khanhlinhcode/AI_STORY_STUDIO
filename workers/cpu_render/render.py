@@ -75,11 +75,7 @@ async def render_job_media(db: AsyncSession, job: ProductionJob) -> Asset:
         source = await db.scalar(
             select(SourceStory).where(SourceStory.episode_id == job.episode_id).limit(1)
         )
-        presets = (
-            [("16x9", 640, 360), ("9x16", 360, 640)]
-            if settings.ai_adapter_mode == "fake"
-            else [("16x9", 1920, 1080), ("9x16", 1080, 1920)]
-        )
+        presets = [("16x9", 1920, 1080), ("9x16", 1080, 1920)]
         videos: dict[str, str] = {}
         for name, width, height in presets:
             output_path = root / name / "episode.mp4"
