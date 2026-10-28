@@ -170,3 +170,22 @@ async def test_ollama_fails_closed_after_three_geography_violations() -> None:
             await OllamaAdapter(client).generate_script("A-81", source_context=SOURCE)
     assert count == 4
     assert failure.value.code == ErrorCode.FACTUAL_VALIDATION_FAILED
+
+
+@pytest.mark.asyncio
+async def test_ollama_reports_timeout_instead_of_empty_failure() -> None:
+    count = 0
+
+    def respond(_request: httpx.Request) -> httpx.Response:
+        nonlocal count
+        count += 1
+        if count == 1:
+            return httpx.Response(200, json={"response": json.dumps(EVIDENCE)})
+        raise httpx.ReadTimeout("", request=_request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(StudioError) as failure:
+            await OllamaAdapter(client).generate_script("A-81", source_context=SOURCE)
+    assert count == 4
+    assert failure.value.code == ErrorCode.MODEL_UNAVAILABLE
+    assert "ReadTimeout" in str(failure.value)

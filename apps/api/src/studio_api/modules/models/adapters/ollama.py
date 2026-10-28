@@ -248,7 +248,7 @@ class OllamaAdapter:
                     raise ValueError("Evidence response is not an object")
                 return ground_source_evidence(payload, source_context)
             except (httpx.HTTPError, ValueError, StudioError) as exc:
-                last_error = str(exc)
+                last_error = f"{type(exc).__name__}: {str(exc) or 'no details'}"
         raise StudioError(
             ErrorCode.FACTUAL_VALIDATION_FAILED,
             f"Could not verify facts from the source: {last_error}",
@@ -406,9 +406,9 @@ class OllamaAdapter:
                     scene["duration_ms"] = min(30_000, max(5_000, words * 450))
                 return result
             except (httpx.HTTPError, ValueError, json.JSONDecodeError) as exc:
-                last_error = str(exc)
+                last_error = f"{type(exc).__name__}: {str(exc) or 'no details'}"
             except Exception as exc:  # jsonschema exposes several validation subclasses
-                last_error = str(exc)
+                last_error = f"{type(exc).__name__}: {str(exc) or 'no details'}"
         raise StudioError(
             ErrorCode.FACTUAL_VALIDATION_FAILED if factual_failure else ErrorCode.MODEL_UNAVAILABLE,
             f"Ollama story failed validation: {last_error}",
