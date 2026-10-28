@@ -17,6 +17,7 @@ from studio_api.core.notifications import send_telegram
 from studio_api.media.audio import fake_narration_wav
 from studio_api.modules.assets.models import Asset
 from studio_api.modules.assets.service import upload_asset
+from studio_api.modules.evaluation.auto_qc import run_episode_qc
 from studio_api.modules.evaluation.models import EvalRun
 from studio_api.modules.models.adapters.registry import get_adapter_registry
 from studio_api.modules.models.adapters.source_image import fetch_nasa_source_image
@@ -47,6 +48,13 @@ async def run_job_async(job_id: UUID) -> bool:
         for step in steps:
             if step.status != "completed":
                 if not await execute_step_async(step.id):
+                    async with SessionFactory() as db:
+                        current = await db.get(ProductionJob, job_id)
+                        if current is not None and current.status in {
+                            "cancelled",
+                            "queued",
+                        }:
+                            return False
                     raise StudioError(
                         ErrorCode.INVALID_TRANSITION, "Step could not be claimed"
                     )
@@ -86,7 +94,7 @@ async def run_job_async(job_id: UUID) -> bool:
     except Exception as exc:
         async with SessionFactory() as db:
             job = await db.get(ProductionJob, job_id)
-            if job is not None and job.status != "cancelled":
+            if job is not None and job.status not in {"cancelled", "queued"}:
                 job.status = "failed"
                 job.error_code = (
                     exc.code.value if isinstance(exc, StudioError) else "STEP_FAILED"
@@ -124,32 +132,67 @@ async def execute_step_async(step_id: UUID) -> bool:
         job.lease_expires_at = step.lease_expires_at
         await db.commit()
         try:
+            output_asset_id: UUID | None = None
             if step.kind == "image":
                 asset = await _generate_image(db, job, step)
-                step.output_manifest_id = asset.id
+                output_asset_id = asset.id
             elif step.kind == "audio":
                 asset = await _generate_audio(db, job, step)
-                step.output_manifest_id = asset.id
+                output_asset_id = asset.id
             elif step.kind == "video":
                 asset = await render_job_media(db, job)
-                step.output_manifest_id = asset.id
+                output_asset_id = asset.id
             elif step.kind == "export":
                 await _evaluate_job(db, job)
             else:
                 raise StudioError(
                     ErrorCode.POLICY_REJECTED, f"Unknown step: {step.kind}"
                 )
+            await db.refresh(job)
+            await db.refresh(step)
+            if job.status == "cancelled" or step.status == "cancelled":
+                step.status = "cancelled"
+                step.output_manifest_id = None
+                step.lease_expires_at = None
+                await db.commit()
+                return False
+            if job.status == "queued" or step.status == "retry":
+                step.status = "retry"
+                step.output_manifest_id = None
+                step.lease_expires_at = None
+                await db.commit()
+                return False
+            if job.status != "running":
+                raise StudioError(
+                    ErrorCode.INVALID_TRANSITION, "Job stopped during step"
+                )
+            step.output_manifest_id = output_asset_id
             step.status = "completed"
             step.lease_expires_at = None
             await db.commit()
             return True
         except Exception as exc:
-            step.status = "failed"
+            await db.rollback()
+            await db.refresh(job)
+            await db.refresh(step)
+            step.status = (
+                "cancelled"
+                if job.status == "cancelled"
+                else "retry"
+                if job.status == "queued"
+                else "failed"
+            )
             step.error_code = (
-                exc.code.value if isinstance(exc, StudioError) else "STEP_FAILED"
+                None
+                if job.status in {"cancelled", "queued"}
+                else exc.code.value
+                if isinstance(exc, StudioError)
+                else "STEP_FAILED"
             )
             step.lease_expires_at = None
             await db.commit()
+            if job.status in {"cancelled", "queued"}:
+                return False
             raise
 
 
@@ -225,6 +268,10 @@ async def _generate_image(db: AsyncSession, job: ProductionJob, step: JobStep) -
         {
             "kind": "generated",
             "scene_revision_id": str(revision.id),
+            "source": manifest.lineage.get("adapter_id"),
+            "rights_review_required": manifest.lineage.get(
+                "rights_review_required", True
+            ),
             "lineage": manifest.lineage,
         },
     )
@@ -243,7 +290,7 @@ async def _generate_audio(db: AsyncSession, job: ProductionJob, step: JobStep) -
         )
         content = Path(manifest.storage_key).read_bytes()
         lineage = manifest.lineage
-        if get_settings().ai_voice_mode == "macos":
+        if get_settings().ai_voice_mode in {"macos", "edge"}:
             with wave.open(str(manifest.storage_key), "rb") as wav:
                 duration_ms = round(wav.getnframes() / wav.getframerate() * 1000)
             scene.duration_ms = min(60_000, max(3000, duration_ms + 500))
@@ -255,6 +302,8 @@ async def _generate_audio(db: AsyncSession, job: ProductionJob, step: JobStep) -
         {
             "kind": "generated",
             "scene_revision_id": str(revision.id),
+            "source": lineage.get("adapter_id"),
+            "rights_review_required": lineage.get("rights_review_required", True),
             "lineage": lineage,
         },
     )
@@ -271,18 +320,17 @@ async def _evaluate_job(db: AsyncSession, job: ProductionJob) -> EvalRun:
 
     manifest = json.loads(await read_asset(manifest_asset))
     episode = await db.get(Episode, job.episode_id)
-    reasons = []
+    qc = await run_episode_qc(db, job, manifest)
+    reasons = list(qc.failed_checks)
     if manifest["fixture_only"]:
         reasons.append("Preview media is not publishable content")
     if episode is None or episode.revision != job.snapshot_revision:
         reasons.append("Episode revision changed during rendering")
-    if not manifest["fixture_only"]:
-        reasons.append(
-            "Image quality, child safety, and voice rights await verified QC"
-        )
     report = {
-        "blocking": True,
+        "blocking": bool(reasons),
         "blocking_issues": reasons,
+        "checks": qc.checks,
+        "warnings": qc.warnings,
         "technical_checks": [
             "h264",
             "aac",
@@ -295,8 +343,8 @@ async def _evaluate_job(db: AsyncSession, job: ProductionJob) -> EvalRun:
     evaluation = EvalRun(
         job_id=job.id,
         model_ref=get_settings().ai_adapter_mode,
-        score=0,
-        passed=False,
+        score=qc.score if not reasons else max(0, qc.score - 10),
+        passed=not reasons,
         report=report,
     )
     db.add(evaluation)
