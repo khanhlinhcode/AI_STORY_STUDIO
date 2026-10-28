@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from difflib import SequenceMatcher
 from typing import Any
 
 import httpx
@@ -15,6 +16,11 @@ from studio_api.modules.models.adapters.types import (
     CapabilityReport,
     GenerationRequest,
     ResourceEstimate,
+)
+from studio_api.modules.narrative.source_evidence import (
+    SourceEvidence,
+    ground_source_evidence,
+    validate_geography_claims,
 )
 
 _LONG_TIME_CLAIM = re.compile(
@@ -52,12 +58,8 @@ def _has_unsupported_season(story: dict[str, Any], summary: str) -> bool:
 
 
 def _has_unsupported_geography(story: dict[str, Any], source: str) -> bool:
-    story_text = " ".join(
-        [story["title"]] + [scene["narration"] for scene in story["scenes"]]
-    )
-    if "bắc cực" in story_text.casefold() and not re.search(
-        r"\bArctic\b|Bắc Cực", source, re.I
-    ):
+    story_text = " ".join([story["title"]] + [scene["narration"] for scene in story["scenes"]])
+    if "bắc cực" in story_text.casefold() and not re.search(r"\bArctic\b|Bắc Cực", source, re.I):
         return True
     travels_north = re.search(
         r"\b(?:heading|headed|moving|moved|drifting|drifted)\s+north\b|"
@@ -68,11 +70,51 @@ def _has_unsupported_geography(story: dict[str, Any], source: str) -> bool:
     return bool(travels_north and _SOUTHBOUND_STORY.search(story_text))
 
 
+def _has_repeated_scenes(story: dict[str, Any]) -> bool:
+    narrations = [
+        re.sub(r"\W+", " ", scene["narration"].casefold()).strip() for scene in story["scenes"]
+    ]
+    return any(
+        SequenceMatcher(None, left, right).ratio() >= 0.86
+        for index, left in enumerate(narrations)
+        for right in narrations[index + 1 :]
+    )
+
+
+def _has_unsupported_source_claim(story: dict[str, Any], summary: str) -> bool:
+    narration = " ".join(scene["narration"] for scene in story["scenes"])
+    if "Brunt Ice Shelf" in summary and re.search(r"tảng\s+băng\s+Brunt", narration, re.I):
+        return True
+    if "underwater shelf" in summary and re.search(
+        r"tảng\s+băng[^.!?]{0,100}(?:chạm\s+bờ|bờ\s+đảo)", narration, re.I
+    ):
+        return True
+    if (
+        "appeared to be bumping" in summary
+        and re.search(r"(?:đã\s+)?va\s+chạm\s+với\s+thềm\s+ngầm", narration, re.I)
+        and not re.search(r"có\s+vẻ|dường\s+như", narration, re.I)
+    ):
+        return True
+    if "tip of the Antarctic Peninsula" in summary and re.search(
+        r"điểm\s+đầu\s+của\s+bán\s+đảo", narration, re.I
+    ):
+        return True
+    return bool(
+        re.search(r"\bforests?\b|\bvegetation\b", summary, re.I)
+        and re.search(
+            r"vệ\s+tinh[^.!?]{0,100}theo\s+dõi[^.!?]{0,60}lá\s+(?:này|nhỏ|ấy)|"
+            r"lá\s+(?:này|nhỏ|ấy)[^.!?]{0,100}vệ\s+tinh[^.!?]{0,60}theo\s+dõi",
+            narration,
+            re.I,
+        )
+    )
+
+
 def _source_factual_hints(source_context: dict[str, str]) -> list[str]:
     title = source_context.get("title", "")
     summary = source_context.get("summary", "")
     hints: list[str] = []
-    if re.search(r"\bAntarctic\b", summary, re.I) and not re.search(
+    if re.search(r"\bAntarcti(?:ca|c)\b", summary, re.I) and not re.search(
         r"\bArctic\b", summary, re.I
     ):
         hints.append("Bối cảnh là Nam Cực; tuyệt đối không viết Bắc Cực")
@@ -85,6 +127,12 @@ def _source_factual_hints(source_context: dict[str, str]) -> list[str]:
         hints.append("Đối tượng di chuyển về phía BẮC; không viết đi về phía nam")
     if "South Georgia" in f"{title} {summary}":
         hints.append("South Georgia là tên riêng của đảo; không phải hướng đi về phía nam")
+    if "appeared to be bumping" in summary:
+        hints.append("Nguồn chỉ nói 'dường như va vào' mép thềm ngầm; không khẳng định va chạm")
+    if re.search(r"\bleaves\b|\bleaf\b", title, re.I) and re.search(
+        r"\bforests?\b|\bvegetation\b", summary, re.I
+    ):
+        hints.append("Vệ tinh quan sát rừng hoặc thảm thực vật, không theo dõi từng chiếc lá")
     return hints
 
 
@@ -126,9 +174,67 @@ class OllamaAdapter:
     async def cancel(self, operation_id: str) -> bool:
         return False
 
+    async def extract_source_evidence(self, source_context: dict[str, str]) -> SourceEvidence:
+        """Extract exact source quotations before drafting a sourced story."""
+        extraction_schema: dict[str, Any] = {
+            "type": "object",
+            "properties": {
+                "subject_name": {"type": "string"},
+                "subject_type": {"type": "string"},
+                "verified_location": {"type": "string"},
+                "verified_facts": {"type": "array", "items": {"type": "string"}},
+                "forbidden_locations": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": [
+                "subject_name",
+                "subject_type",
+                "verified_location",
+                "verified_facts",
+                "forbidden_locations",
+            ],
+        }
+        source_text = f"{source_context.get('title', '')}\n{source_context.get('summary', '')}"
+        last_error = "No verifiable evidence"
+        for _ in range(3):
+            try:
+                response = await self.client.post(
+                    f"{self.settings.ollama_base_url}/api/generate",
+                    json={
+                        "model": self.settings.ollama_model,
+                        "system": (
+                            "Trích xuất dữ kiện về đối tượng CHÍNH trong TIÊU ĐỀ, không chọn "
+                            "đối tượng so sánh hay bối cảnh lịch sử. subject_name và "
+                            "verified_location "
+                            "phải là chuỗi xuất hiện NGUYÊN VĂN trong bài. verified_facts "
+                            "gồm 3–5 đoạn trích NGUYÊN VĂN về đối tượng chính. Nếu bài không nêu "
+                            "vị trí, để verified_location rỗng. forbidden_locations là địa "
+                            "danh chỉ liên quan tới đối tượng khác. Không suy luận hoặc dịch. "
+                            "Chỉ xuất JSON."
+                        ),
+                        "prompt": f"Bài báo:\n{source_text}",
+                        "format": extraction_schema,
+                        "stream": False,
+                        "think": False,
+                        "keep_alive": "0",
+                        "options": {"num_ctx": 4096, "temperature": 0},
+                    },
+                )
+                response.raise_for_status()
+                payload = json.loads(response.json().get("response", "{}"))
+                if not isinstance(payload, dict):
+                    raise ValueError("Evidence response is not an object")
+                return ground_source_evidence(payload, source_context)
+            except (httpx.HTTPError, ValueError, StudioError) as exc:
+                last_error = str(exc)
+        raise StudioError(
+            ErrorCode.FACTUAL_VALIDATION_FAILED,
+            f"Could not verify facts from the source: {last_error}",
+        )
+
     async def generate_script(
         self, topic: str, style: str = "storybook", source_context: dict[str, str] | None = None
     ) -> dict[str, Any]:
+        evidence = await self.extract_source_evidence(source_context) if source_context else None
         episode_schema_path = schema_path("episode_spec.v1.json")
         schema = json.loads(episode_schema_path.read_text(encoding="utf-8"))
         scene_schema = json.loads(
@@ -143,8 +249,6 @@ class OllamaAdapter:
         system = (
             "Bạn là nhà văn truyện thiếu nhi Việt Nam. Tất cả title, lesson, mô tả "
             "nhân vật và lời kể narration PHẢI là tiếng Việt CÓ DẤU. "
-            "Ví dụ title: 'Hành trình của chiếc lá nhỏ'; narration: "
-            "'Bạn Thỏ nhìn chiếc lá đỏ và mỉm cười.' "
             "Không chép nguyên tiêu đề tiếng Anh vào title. Chỉ image_desc được viết bằng "
             "tiếng Anh. Trả về JSON đúng schema với đúng 6 cảnh. "
             "Mỗi narration dài 1–2 câu, phù hợp trẻ 6–10 tuổi. "
@@ -161,6 +265,36 @@ class OllamaAdapter:
             "không dùng cụm 'chiếc băng'. "
             "Không gán chi tiết hư cấu cho NASA. Tuyệt đối không dùng chữ Hán/Trung Quốc."
         )
+        if evidence is not None:
+            scene_plan = [
+                f"Cảnh {index + 1}: "
+                + (
+                    evidence.verified_facts[index]
+                    if index < len(evidence.verified_facts)
+                    else "kết thúc bằng bài học rút ra từ các dữ kiện trên"
+                )
+                for index in range(6)
+            ]
+            system += (
+                "\nRÀNG BUỘC DỮ KIỆN: Đối tượng chính: "
+                f"{evidence.subject_name} ({evidence.subject_type}); "
+                f"vị trí được xác minh: {evidence.verified_location or 'không nêu'}. "
+                "Chỉ dựa trên các trích dẫn nguyên văn này: "
+                f"{json.dumps(evidence.verified_facts, ensure_ascii=False)}. "
+                "Không đề cập các địa danh cấm: "
+                f"{json.dumps(evidence.forbidden_locations, ensure_ascii=False)}. "
+                "Mọi câu địa lý phải dựa trên trích dẫn. Không gán địa danh của "
+                "đối tượng khác cho đối tượng chính. Nếu nguồn nói 'approached' "
+                "thì chỉ viết 'đến gần', không viết 'chạm bờ'. 'Ice shelf' là "
+                "'thềm băng', không phải một tảng băng riêng. 'Underwater shelf' "
+                "là 'thềm ngầm'. Khi không chắc về chi tiết, bỏ chi tiết đó."
+            )
+            system += (
+                " Nhân vật hư cấu chỉ quan sát hoặc học hỏi; không tự tham gia "
+                "sự kiện khoa học. Sáu cảnh phải kể sáu ý khác nhau, không lặp "
+                "lại cùng một hành động hoặc lời giải thích."
+                "\nDÀN Ý BẮT BUỘC: " + " | ".join(scene_plan)
+            )
         source_text = ""
         if source_context:
             hints = _source_factual_hints(source_context)
@@ -171,6 +305,7 @@ class OllamaAdapter:
                 + json.dumps(source_context, ensure_ascii=False)
             )
         last_error = "invalid output"
+        factual_failure = False
         for _ in range(3):
             try:
                 response = await self.client.post(
@@ -198,17 +333,36 @@ class OllamaAdapter:
                     continue
                 if source_context and _has_unverified_long_time_claim(result):
                     last_error = "Story has an unverified long timeline"
+                    factual_failure = True
                     continue
                 if source_context and _has_unsupported_season(
                     result, source_context.get("summary", "")
                 ):
                     last_error = "Story invents a season absent from the source"
+                    factual_failure = True
                     continue
                 if source_context and _has_unsupported_geography(
                     result,
                     f"{source_context.get('title', '')} {source_context.get('summary', '')}",
                 ):
                     last_error = "Story contradicts source geography or travel direction"
+                    factual_failure = True
+                    continue
+                if evidence is not None and (
+                    violations := validate_geography_claims(result, evidence)
+                ):
+                    last_error = "; ".join(violations)
+                    factual_failure = True
+                    continue
+                if source_context and _has_unsupported_source_claim(
+                    result, source_context.get("summary", "")
+                ):
+                    last_error = "Story makes a claim unsupported by source context"
+                    factual_failure = True
+                    continue
+                if source_context and _has_repeated_scenes(result):
+                    last_error = "Story repeats narration across scenes"
+                    factual_failure = True
                     continue
                 vietnamese_fields = [result["title"], result["lesson"]] + [
                     scene["narration"] for scene in result["scenes"]
@@ -229,5 +383,6 @@ class OllamaAdapter:
             except Exception as exc:  # jsonschema exposes several validation subclasses
                 last_error = str(exc)
         raise StudioError(
-            ErrorCode.MODEL_UNAVAILABLE, f"Ollama returned invalid JSON: {last_error}"
+            ErrorCode.FACTUAL_VALIDATION_FAILED if factual_failure else ErrorCode.MODEL_UNAVAILABLE,
+            f"Ollama story failed validation: {last_error}",
         )
